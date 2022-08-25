@@ -1,20 +1,42 @@
 package router
 
 import (
-	"github.com/gorilla/mux"
-	_ "github.com/mattn/go-sqlite3"
 	"database/sql"
-	"log"
-	"net/http"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/dgrijalva/jwt-go"
+	"github.com/gorilla/mux"
+	_ "github.com/mattn/go-sqlite3"
 
 	"test/model"
 	"test/sqldb"
 )
 
 var db *sql.DB = sqldb.ConnectDB()
+
+var jwtKey = []byte("secret_key")
+
+var users = map[string]string{
+	"user1": "password1",
+	"user2": "password2",
+}
+
+type Credentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type Claims struct {
+	Username string `json:"username"`
+	jwt.StandardClaims
+}
+
+
 
 func checkErr(err error) {
 	if err != nil {
@@ -26,6 +48,9 @@ func Routes() {
 
 	router := mux.NewRouter().StrictSlash(true)
 	router.HandleFunc("/", homePage)
+	router.HandleFunc("/login", login).Methods("POST")
+	router.HandleFunc("/home", Home).Methods("GET")
+	router.HandleFunc("/refresh", Refresh).Methods("GET")
 	router.HandleFunc("/commit", addCommitMessage).Methods("POST")
 	router.HandleFunc("/commits", getAllCommitMessage).Methods("GET")
 	router.HandleFunc("/commits/{id}", getCommitMessageById).Methods("GET")
@@ -37,6 +62,146 @@ func Routes() {
 func homePage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Welcome to the HomePage!")
 	fmt.Println("Endpoint Hit: homePage")
+}
+
+func login(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Endpoint Hit: Login")
+
+	var creds Credentials
+	err := json.NewDecoder(r.Body).Decode(&creds)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	expectedPassword, ok := users[creds.Username]
+
+	if !ok || expectedPassword != creds.Password {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	expirationTime := time.Now().Add(time.Minute *5)
+
+	claims := &Claims{
+		Username: creds.Username,
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: expirationTime.Unix(),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtKey)
+
+	if err != nil {
+		fmt.Println(err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	http.SetCookie(w,
+	&http.Cookie{
+		Name: "token",
+		Value: tokenString,
+		Expires: expirationTime,
+	})
+
+
+}
+
+func Home(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie("token")
+	if err != nil {
+		if err == http.ErrNoCookie {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	tokenStr := cookie.Value
+
+	claims := &Claims{}
+
+	tkn, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
+		return jwtKey, nil
+	})
+
+	if err != nil {
+		if err == jwt.ErrSignatureInvalid {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if !tkn.Valid {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	w.Write([]byte(fmt.Sprintf("Welcome %s!", claims.Username)))
+}
+
+func Refresh(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie("token")
+	if err != nil {
+		if err == http.ErrNoCookie {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	tokenStr := cookie.Value
+
+	claims := &Claims{}
+
+	tkn, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
+		return jwtKey, nil
+	})
+
+	if err != nil {
+		if err == jwt.ErrSignatureInvalid {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if !tkn.Valid {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	// if time.Unix(claims.ExpiresAt, 0).Sub(time.Now()) > 30*time.Second {
+	// 	w.WriteHeader(http.StatusBadRequest)
+	// 	return
+	// }
+	
+	expirationTime := time.Now().Add(time.Minute *5)
+
+	claims.ExpiresAt = expirationTime.Unix()
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtKey)
+
+	if err != nil {
+		fmt.Println(err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	http.SetCookie(w,
+		&http.Cookie{
+			Name: "refresh_token",
+			Value: tokenString,
+			Expires: expirationTime,
+		})
 }
 
 func addCommitMessage(w http.ResponseWriter, r *http.Request) {
